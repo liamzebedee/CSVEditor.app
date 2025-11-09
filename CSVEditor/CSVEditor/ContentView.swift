@@ -1,150 +1,431 @@
 import SwiftUI
 import AppKit
 
-struct ContentView: NSViewControllerRepresentable {
+struct ContentView: View {
+    @StateObject private var viewModel = CSVViewModel()
     let initialFileURL: URL?
 
-    func makeNSViewController(context: Context) -> TableViewController {
-        let controller = TableViewController()
-        controller.initialFileURL = initialFileURL
-        return controller
+    private var windowTitle: String {
+        if let url = viewModel.currentFileURL {
+            let fileName = url.lastPathComponent
+            return viewModel.isModified ? "\(fileName) [Modified]" : fileName
+        }
+        return "CSV Editor"
     }
 
-    func updateNSViewController(_ nsViewController: TableViewController, context: Context) {
+    var body: some View {
+        VStack(spacing: 0) {
+            if viewModel.data.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("No file loaded")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+            } else {
+                GridView(viewModel: viewModel)
+            }
+        }
+        .navigationTitle(windowTitle)
+        .onAppear {
+            if let url = initialFileURL {
+                viewModel.loadFile(url: url)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openFile)) { _ in
+            viewModel.openFile()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openRecentFile)) { notification in
+            if let userInfo = notification.userInfo,
+               let url = userInfo["url"] as? URL {
+                viewModel.loadFile(url: url)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .reloadFile)) { _ in
+            viewModel.reloadFile()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveFile)) { _ in
+            viewModel.saveFile()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveFileAs)) { _ in
+            viewModel.saveFileAs()
+        }
     }
 }
 
-class TableViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
-    var viewModel = CSVViewModel()
-    var tableView: NSTableView!
-    var scrollView: NSScrollView!
-    var initialFileURL: URL?
-    var undoStack: [(row: Int, col: Int, oldValue: String, newValue: String)] = []
-    var selectedRow: Int = 0
-    var selectedColumn: Int = 0
+struct GridView: NSViewRepresentable {
+    @ObservedObject var viewModel: CSVViewModel
 
-    override func loadView() {
-        view = NSView()
-        view.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
-
-        // Create toolbar
-        let toolbar = NSView()
-        toolbar.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(toolbar)
-
-        let openButton = NSButton(title: "Open File", target: self, action: #selector(openFile))
-        openButton.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(openButton)
-
-        let saveButton = NSButton(title: "Save", target: self, action: #selector(saveFile))
-        saveButton.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(saveButton)
-
-        let saveAsButton = NSButton(title: "Save As...", target: self, action: #selector(saveFileAs))
-        saveAsButton.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(saveAsButton)
-
-        // Create table view
-        scrollView = NSScrollView()
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
-        scrollView.autohidesScrollers = true
+        scrollView.autohidesScrollers = false
+        scrollView.borderType = .noBorder
 
-        tableView = NSTableView()
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.allowsColumnResizing = true
-        tableView.usesAlternatingRowBackgroundColors = true
-        tableView.allowsColumnSelection = true
-        tableView.allowsMultipleSelection = false
+        let gridView = GridHostView()
+        gridView.viewModel = viewModel
 
-        scrollView.documentView = tableView
-        view.addSubview(scrollView)
+        scrollView.documentView = gridView
 
-        // Layout
-        NSLayoutConstraint.activate([
-            toolbar.topAnchor.constraint(equalTo: view.topAnchor),
-            toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            toolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            toolbar.heightAnchor.constraint(equalToConstant: 50),
-
-            openButton.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 10),
-            openButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-
-            saveButton.trailingAnchor.constraint(equalTo: saveAsButton.leadingAnchor, constant: -10),
-            saveButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-
-            saveAsButton.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -10),
-            saveAsButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-
-            scrollView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-        ])
+        return scrollView
     }
 
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        if let url = initialFileURL {
-            viewModel.loadFile(url: url)
-            reloadTable()
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let gridView = nsView.documentView as? GridHostView else { return }
+        gridView.viewModel = viewModel
+        if !viewModel.data.isEmpty {
+            let shouldFocus = viewModel.shouldFocusFirstCell
+            if shouldFocus {
+                viewModel.shouldFocusFirstCell = false
+            }
+            gridView.reloadData(focusOnFirstCell: shouldFocus)
+        }
+    }
+}
+
+class GridHostView: NSView {
+    weak var viewModel: CSVViewModel?
+    var cells: [[CellTextField]] = []
+    var selectedRow: Int = 0
+    var selectedCol: Int = 0
+    var undoStack: [(row: Int, col: Int, oldValue: String)] = []
+    var reloadUndoStack: [[[String]]] = []
+
+    // Use flipped coordinates so (0,0) is top-left
+    override var isFlipped: Bool { return true }
+
+    // Enable standard editing commands
+    override func validRequestor(forSendType sendType: NSPasteboard.PasteboardType?, returnType: NSPasteboard.PasteboardType?) -> Any? {
+        if sendType == .string || returnType == .string {
+            return self
+        }
+        return super.validRequestor(forSendType: sendType, returnType: returnType)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+
+        // Listen for reload notifications
+        NotificationCenter.default.addObserver(self, selector: #selector(handleSaveStateBeforeReload), name: .saveStateBeforeReload, object: nil)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc func handleSaveStateBeforeReload() {
+        saveStateForReload()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var acceptsFirstResponder: Bool { return true }
+
+    override func keyDown(with event: NSEvent) {
+        // Handle command key shortcuts
+        if event.modifierFlags.contains(.command) {
+            switch event.charactersIgnoringModifiers {
+            case "o", "r", "s":
+                // Pass these through to SwiftUI buttons by calling super
+                super.keyDown(with: event)
+                return
+            case "z":
+                performUndo()
+                return
+            case "c":
+                copy(nil)
+                return
+            case "x":
+                cut(nil)
+                return
+            case "v":
+                paste(nil)
+                return
+            case "a":
+                // Cmd+A in grid context - could select all, but we'll skip for now
+                return
+            default:
+                break
+            }
         }
 
-        // Add keyboard handlers
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self else { return event }
-
-            // Cmd+S to save
-            if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "s" {
-                self.saveFile()
-                return nil
+        switch event.keyCode {
+        case 126: // Up
+            moveSelection(rowDelta: -1, colDelta: 0)
+        case 125: // Down
+            moveSelection(rowDelta: 1, colDelta: 0)
+        case 123: // Left
+            moveSelection(rowDelta: 0, colDelta: -1)
+        case 124: // Right
+            moveSelection(rowDelta: 0, colDelta: 1)
+        case 36, 76: // Enter/Return
+            startEditing()
+        case 48: // Tab
+            if event.modifierFlags.contains(.shift) {
+                moveSelection(rowDelta: 0, colDelta: -1)
+            } else {
+                moveSelection(rowDelta: 0, colDelta: 1)
             }
+        case 51: // Delete/Backspace
+            // Delete starts editing with empty content
+            startEditingWithText("")
+        default:
+            // Don't start editing if any modifier keys are pressed (except Shift)
+            let hasModifiers = event.modifierFlags.contains(.command) ||
+                              event.modifierFlags.contains(.control) ||
+                              event.modifierFlags.contains(.option)
 
-            // Cmd+Z to undo
-            if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "z" {
-                self.performUndo()
-                return nil
+            if !hasModifiers {
+                // Check if this is a printable character
+                if let chars = event.charactersIgnoringModifiers, !chars.isEmpty {
+                    let char = chars.first!
+                    // Start editing if it's a printable character (not a control character)
+                    if char.isLetter || char.isNumber || char.isPunctuation || char.isSymbol || char == " " {
+                        startEditingWithText(String(char))
+                        return
+                    }
+                }
             }
-
-            // Arrow key navigation
-            if event.keyCode == 126 { // Up arrow
-                self.moveSelection(rowDelta: -1, colDelta: 0)
-                return nil
-            } else if event.keyCode == 125 { // Down arrow
-                self.moveSelection(rowDelta: 1, colDelta: 0)
-                return nil
-            } else if event.keyCode == 123 { // Left arrow
-                self.moveSelection(rowDelta: 0, colDelta: -1)
-                return nil
-            } else if event.keyCode == 124 { // Right arrow
-                self.moveSelection(rowDelta: 0, colDelta: 1)
-                return nil
-            } else if event.keyCode == 36 || event.keyCode == 76 { // Enter or Return
-                self.startEditingCurrentCell()
-                return nil
-            }
-
-            return event
+            super.keyDown(with: event)
         }
     }
 
-    func reloadTable() {
-        while tableView.tableColumns.count > 0 {
-            tableView.removeTableColumn(tableView.tableColumns[0])
+    func reloadData(focusOnFirstCell: Bool = false) {
+        guard let viewModel = viewModel else { return }
+
+        // Remove old cells
+        cells.flatMap { $0 }.forEach { $0.removeFromSuperview() }
+        cells = []
+        subviews.forEach { $0.removeFromSuperview() }
+
+        let data = viewModel.data
+        guard !data.isEmpty, let firstRow = data.first else { return }
+
+        let cellHeight: CGFloat = 25
+        let headerHeight: CGFloat = 25
+        let minCellWidth: CGFloat = 100
+        let cellPadding: CGFloat = 20
+
+        // Calculate column widths based on content
+        var columnWidths: [CGFloat] = []
+        for col in 0..<firstRow.count {
+            var maxWidth: CGFloat = minCellWidth
+
+            // Check header width
+            let headerText = columnLabel(col)
+            let headerSize = (headerText as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)])
+            maxWidth = max(maxWidth, headerSize.width + cellPadding)
+
+            // Check all cell widths in this column
+            for row in 0..<data.count {
+                if col < data[row].count {
+                    let cellText = data[row][col]
+                    let textSize = (cellText as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)])
+                    maxWidth = max(maxWidth, textSize.width + cellPadding)
+                }
+            }
+
+            columnWidths.append(maxWidth)
         }
 
-        guard let firstRow = viewModel.data.first else { return }
+        // Calculate total size needed for scrolling
+        let totalWidth = columnWidths.reduce(0, +)
+        let totalHeight = headerHeight + CGFloat(data.count) * cellHeight
 
-        for i in 0..<firstRow.count {
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col\(i)"))
-            column.title = columnLabel(i)
-            column.width = 150
-            tableView.addTableColumn(column)
+        // Set frame to accommodate all content
+        self.frame = NSRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
+
+        // Create headers (at top since we're using flipped coordinates)
+        var xOffset: CGFloat = 0
+        for col in 0..<firstRow.count {
+            let label = NSTextField(labelWithString: columnLabel(col))
+            label.frame = NSRect(x: xOffset, y: 0, width: columnWidths[col], height: headerHeight)
+            label.alignment = .center
+            label.backgroundColor = NSColor.controlBackgroundColor
+            label.isBordered = true
+            addSubview(label)
+            xOffset += columnWidths[col]
         }
 
-        tableView.reloadData()
+        // Create cells (starting from headerHeight down)
+        for row in 0..<data.count {
+            var rowCells: [CellTextField] = []
+            xOffset = 0
+            for col in 0..<data[row].count {
+                let cell = CellTextField()
+                cell.frame = NSRect(x: xOffset, y: headerHeight + CGFloat(row) * cellHeight, width: columnWidths[col], height: cellHeight)
+                cell.stringValue = data[row][col]
+                cell.isBordered = true
+                cell.isEditable = false
+                cell.isSelectable = false
+                cell.drawsBackground = true
+                cell.backgroundColor = .white
+                cell.row = row
+                cell.col = col
+                cell.gridView = self
+
+                let clickRecognizer = NSClickGestureRecognizer(target: self, action: #selector(cellClicked(_:)))
+                cell.addGestureRecognizer(clickRecognizer)
+
+                addSubview(cell)
+                rowCells.append(cell)
+                xOffset += columnWidths[col]
+            }
+            cells.append(rowCells)
+        }
+
+        if focusOnFirstCell {
+            selectedRow = 0
+            selectedCol = 0
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.updateSelection()
+                self.window?.makeFirstResponder(self)
+            }
+        } else {
+            updateSelection()
+        }
+    }
+
+    @objc func cellClicked(_ recognizer: NSClickGestureRecognizer) {
+        if let cell = recognizer.view as? CellTextField {
+            selectedRow = cell.row
+            selectedCol = cell.col
+            updateSelection()
+            window?.makeFirstResponder(self)
+        }
+    }
+
+    func startEditing() {
+        guard selectedRow < cells.count, selectedCol < cells[selectedRow].count else { return }
+        let cell = cells[selectedRow][selectedCol]
+
+        cell.originalValue = cell.stringValue
+        undoStack.append((row: selectedRow, col: selectedCol, oldValue: cell.stringValue))
+
+        cell.isEditable = true
+        cell.isSelectable = true
+        window?.makeFirstResponder(cell)
+        cell.currentEditor()?.selectAll(nil)
+    }
+
+    func startEditingWithText(_ text: String) {
+        guard selectedRow < cells.count, selectedCol < cells[selectedRow].count else { return }
+        let cell = cells[selectedRow][selectedCol]
+
+        cell.originalValue = cell.stringValue
+        undoStack.append((row: selectedRow, col: selectedCol, oldValue: cell.stringValue))
+
+        cell.stringValue = text
+        cell.isEditable = true
+        cell.isSelectable = true
+        window?.makeFirstResponder(cell)
+
+        // Move cursor to end of text
+        if let editor = cell.currentEditor() as? NSTextView {
+            editor.moveToEndOfDocument(nil)
+        }
+    }
+
+    func cancelEditing(_ cell: CellTextField) {
+        // Remove the undo entry since we're cancelling
+        if let lastUndo = undoStack.last,
+           lastUndo.row == cell.row && lastUndo.col == cell.col {
+            undoStack.removeLast()
+        }
+
+        cell.isEditable = false
+        cell.isSelectable = false
+
+        // Update selection to the edited cell
+        selectedRow = cell.row
+        selectedCol = cell.col
+
+        // Restore focus to grid view
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.updateSelection()
+            self.window?.makeFirstResponder(self)
+        }
+    }
+
+    func moveSelection(rowDelta: Int, colDelta: Int) {
+        guard let viewModel = viewModel else { return }
+
+        let newRow = max(0, min(viewModel.data.count - 1, selectedRow + rowDelta))
+        let newCol = max(0, min((viewModel.data.first?.count ?? 0) - 1, selectedCol + colDelta))
+
+        selectedRow = newRow
+        selectedCol = newCol
+        updateSelection()
+        scrollToSelectedCell()
+        window?.makeFirstResponder(self)
+    }
+
+    func scrollToSelectedCell() {
+        guard selectedRow < cells.count, selectedCol < cells[selectedRow].count else { return }
+        let cell = cells[selectedRow][selectedCol]
+
+        // Scroll to make the cell visible
+        if let scrollView = enclosingScrollView {
+            let cellRect = cell.frame
+            scrollView.contentView.scrollToVisible(cellRect)
+        }
+    }
+
+    func updateSelection() {
+        for row in cells {
+            for cell in row {
+                cell.layer?.borderWidth = (cell.row == selectedRow && cell.col == selectedCol) ? 2 : 0
+                cell.layer?.borderColor = NSColor.systemBlue.cgColor
+            }
+        }
+    }
+
+    func cellDidEndEditing(_ cell: CellTextField) {
+        viewModel?.data[cell.row][cell.col] = cell.stringValue
+        viewModel?.isModified = true
+        cell.isEditable = false
+        cell.isSelectable = false
+
+        // Update selection to the edited cell
+        selectedRow = cell.row
+        selectedCol = cell.col
+
+        // Restore focus to grid view and update selection
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.updateSelection()
+            self.window?.makeFirstResponder(self)
+        }
+    }
+
+    func performUndo() {
+        // First check if we have a reload to undo
+        if let lastReloadState = reloadUndoStack.popLast() {
+            viewModel?.data = lastReloadState
+            viewModel?.isModified = true
+            reloadData()
+            return
+        }
+
+        // Otherwise undo a cell edit
+        guard let lastEdit = undoStack.popLast() else { return }
+        viewModel?.data[lastEdit.row][lastEdit.col] = lastEdit.oldValue
+        viewModel?.isModified = true
+        reloadData()
+    }
+
+    func saveStateForReload() {
+        guard let viewModel = viewModel else { return }
+        // Deep copy the current data state
+        reloadUndoStack.append(viewModel.data.map { $0.map { $0 } })
     }
 
     private func columnLabel(_ index: Int) -> String {
@@ -157,118 +438,65 @@ class TableViewController: NSViewController, NSTableViewDataSource, NSTableViewD
         return label
     }
 
-    @objc func openFile() {
-        viewModel.openFile()
-        reloadTable()
+    // MARK: - Copy/Paste Support
+
+    @objc func copy(_ sender: Any?) {
+        guard selectedRow < cells.count, selectedCol < cells[selectedRow].count else { return }
+        let cell = cells[selectedRow][selectedCol]
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(cell.stringValue, forType: .string)
     }
 
-    @objc func saveFile() {
-        viewModel.saveFile()
+    @objc func cut(_ sender: Any?) {
+        guard selectedRow < cells.count, selectedCol < cells[selectedRow].count else { return }
+        let cell = cells[selectedRow][selectedCol]
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(cell.stringValue, forType: .string)
+
+        // Clear the cell
+        undoStack.append((row: selectedRow, col: selectedCol, oldValue: cell.stringValue))
+        cell.stringValue = ""
+        viewModel?.data[selectedRow][selectedCol] = ""
+        viewModel?.isModified = true
     }
 
-    @objc func saveFileAs() {
-        viewModel.saveFileAs()
-    }
+    @objc func paste(_ sender: Any?) {
+        guard selectedRow < cells.count, selectedCol < cells[selectedRow].count else { return }
+        let pasteboard = NSPasteboard.general
+        guard let pastedString = pasteboard.string(forType: .string) else { return }
 
-    func moveSelection(rowDelta: Int, colDelta: Int) {
-        let newRow = max(0, min(viewModel.data.count - 1, selectedRow + rowDelta))
-        let newCol = max(0, min((viewModel.data.first?.count ?? 0) - 1, selectedColumn + colDelta))
-
-        selectedRow = newRow
-        selectedColumn = newCol
-
-        tableView.selectRowIndexes(IndexSet(integer: newRow), byExtendingSelection: false)
-        tableView.selectColumnIndexes(IndexSet(integer: newCol), byExtendingSelection: false)
-        tableView.scrollRowToVisible(newRow)
-        tableView.scrollColumnToVisible(newCol)
-    }
-
-    func startEditingCurrentCell() {
-        guard selectedRow < viewModel.data.count,
-              selectedColumn < (viewModel.data.first?.count ?? 0) else { return }
-
-        tableView.editColumn(selectedColumn, row: selectedRow, with: nil, select: true)
-    }
-
-    // MARK: - NSTableViewDataSource
-
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        return viewModel.data.count
-    }
-
-    // MARK: - NSTableViewDelegate
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let tableColumn = tableColumn,
-              let columnIndex = tableView.tableColumns.firstIndex(of: tableColumn) else {
-            return nil
-        }
-
-        let identifier = NSUserInterfaceItemIdentifier("Cell")
-        var cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
-
-        if cell == nil {
-            cell = NSTableCellView()
-            cell?.identifier = identifier
-
-            let textField = NSTextField()
-            textField.isBordered = false
-            textField.backgroundColor = .clear
-            textField.isEditable = true
-            textField.isSelectable = true
-            textField.drawsBackground = false
-            textField.translatesAutoresizingMaskIntoConstraints = false
-
-            cell?.addSubview(textField)
-            cell?.textField = textField
-
-            NSLayoutConstraint.activate([
-                textField.leadingAnchor.constraint(equalTo: cell!.leadingAnchor, constant: 2),
-                textField.trailingAnchor.constraint(equalTo: cell!.trailingAnchor, constant: -2),
-                textField.topAnchor.constraint(equalTo: cell!.topAnchor, constant: 2),
-                textField.bottomAnchor.constraint(equalTo: cell!.bottomAnchor, constant: -2)
-            ])
-        }
-
-        cell?.textField?.stringValue = viewModel.data[row][columnIndex]
-        cell?.textField?.delegate = self
-        cell?.textField?.tag = row * 1000 + columnIndex
-
-        return cell
+        let cell = cells[selectedRow][selectedCol]
+        undoStack.append((row: selectedRow, col: selectedCol, oldValue: cell.stringValue))
+        cell.stringValue = pastedString
+        viewModel?.data[selectedRow][selectedCol] = pastedString
+        viewModel?.isModified = true
     }
 }
 
-extension TableViewController: NSTextFieldDelegate {
-    func controlTextDidBeginEditing(_ obj: Notification) {
-        if let textField = obj.object as? NSTextField {
-            let row = textField.tag / 1000
-            let col = textField.tag % 1000
-            // Store original value when editing begins
-            textField.placeholderString = viewModel.data[row][col]
-        }
+class CellTextField: NSTextField {
+    var row: Int = 0
+    var col: Int = 0
+    weak var gridView: GridHostView?
+    var originalValue: String = ""
+    var editingCancelled: Bool = false
+
+    override func cancelOperation(_ sender: Any?) {
+        // Escape key was pressed
+        editingCancelled = true
+        stringValue = originalValue
+        window?.makeFirstResponder(gridView)
     }
 
-    func controlTextDidEndEditing(_ obj: Notification) {
-        if let textField = obj.object as? NSTextField {
-            let row = textField.tag / 1000
-            let col = textField.tag % 1000
-            let oldValue = textField.placeholderString ?? viewModel.data[row][col]
-            let newValue = textField.stringValue
+    override func textDidEndEditing(_ notification: Notification) {
+        super.textDidEndEditing(notification)
 
-            if oldValue != newValue {
-                // Add to undo stack
-                undoStack.append((row: row, col: col, oldValue: oldValue, newValue: newValue))
-                viewModel.data[row][col] = newValue
-                viewModel.isModified = true
-            }
+        if editingCancelled {
+            editingCancelled = false
+            gridView?.cancelEditing(self)
+        } else {
+            gridView?.cellDidEndEditing(self)
         }
-    }
-
-    func performUndo() {
-        guard let lastEdit = undoStack.popLast() else { return }
-
-        viewModel.data[lastEdit.row][lastEdit.col] = lastEdit.oldValue
-        viewModel.isModified = true
-        tableView.reloadData()
     }
 }

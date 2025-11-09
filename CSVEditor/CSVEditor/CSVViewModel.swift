@@ -5,6 +5,7 @@ class CSVViewModel: ObservableObject {
     @Published var data: [[String]] = []
     @Published var isModified = false
     @Published var currentFileURL: URL?
+    @Published var shouldFocusFirstCell = false
 
     private var delimiter: String = ","
 
@@ -36,10 +37,27 @@ class CSVViewModel: ObservableObject {
             data = parseCSV(content: content, delimiter: delimiter)
             currentFileURL = url
             isModified = false
+            shouldFocusFirstCell = true
+
+            // Notify that a file was loaded
+            NotificationCenter.default.post(
+                name: .fileLoaded,
+                object: nil,
+                userInfo: ["url": url]
+            )
         } catch {
             print("Error loading file: \(error)")
             showAlert(message: "Failed to load file: \(error.localizedDescription)")
         }
+    }
+
+    func reloadFile() {
+        guard let url = currentFileURL else { return }
+
+        // Notify GridHostView to save state before reloading
+        NotificationCenter.default.post(name: .saveStateBeforeReload, object: nil)
+
+        loadFile(url: url)
     }
 
     private func parseCSV(content: String, delimiter: String) -> [[String]] {

@@ -5,7 +5,9 @@
       "Bash(xcodebuild:*)",
       "Bash(ls:*)",
       "Bash(open:*)",
-      "Bash(killall:*)"
+      "Bash(killall:*)",
+      "Bash(\"/Users/liamz/Library/CloudStorage/Dropbox/Tax/2020 - 2025 (AU)/code/cex-work/random/build-and-run.sh\")",
+      "Bash(/Users/liamz/Library/CloudStorage/Dropbox/Tax/2020 - 2025 (AU)/code/cex-work/random/build-and-run.sh)"
     ],
     "deny": [],
     "ask": []
