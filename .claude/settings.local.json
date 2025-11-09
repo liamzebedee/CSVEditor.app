@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(swift --version:*)",
+      "Bash(xcodebuild:*)",
+      "Bash(ls:*)",
+      "Bash(open:*)",
+      "Bash(killall:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
