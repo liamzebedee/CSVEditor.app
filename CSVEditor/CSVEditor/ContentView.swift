@@ -390,7 +390,7 @@ class GridHostView: NSView {
 
     func cellDidEndEditing(_ cell: CellTextField) {
         viewModel?.data[cell.row][cell.col] = cell.stringValue
-        viewModel?.isModified = true
+        viewModel?.updateModifiedState()
         cell.isEditable = false
         cell.isSelectable = false
 
@@ -410,7 +410,7 @@ class GridHostView: NSView {
         // First check if we have a reload to undo
         if let lastReloadState = reloadUndoStack.popLast() {
             viewModel?.data = lastReloadState
-            viewModel?.isModified = true
+            viewModel?.updateModifiedState()
             reloadData()
             return
         }
@@ -418,7 +418,7 @@ class GridHostView: NSView {
         // Otherwise undo a cell edit
         guard let lastEdit = undoStack.popLast() else { return }
         viewModel?.data[lastEdit.row][lastEdit.col] = lastEdit.oldValue
-        viewModel?.isModified = true
+        viewModel?.updateModifiedState()
         reloadData()
     }
 
@@ -459,7 +459,7 @@ class GridHostView: NSView {
         undoStack.append((row: selectedRow, col: selectedCol, oldValue: cell.stringValue))
         cell.stringValue = ""
         viewModel?.data[selectedRow][selectedCol] = ""
-        viewModel?.isModified = true
+        viewModel?.updateModifiedState()
     }
 
     @objc func paste(_ sender: Any?) {
@@ -471,7 +471,7 @@ class GridHostView: NSView {
         undoStack.append((row: selectedRow, col: selectedCol, oldValue: cell.stringValue))
         cell.stringValue = pastedString
         viewModel?.data[selectedRow][selectedCol] = pastedString
-        viewModel?.isModified = true
+        viewModel?.updateModifiedState()
     }
 }
 

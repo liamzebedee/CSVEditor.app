@@ -8,6 +8,7 @@ class CSVViewModel: ObservableObject {
     @Published var shouldFocusFirstCell = false
 
     private var delimiter: String = ","
+    private var savedState: [[String]] = []
 
     func openFile() {
         let panel = NSOpenPanel()
@@ -35,6 +36,7 @@ class CSVViewModel: ObservableObject {
 
             // Parse CSV/TSV
             data = parseCSV(content: content, delimiter: delimiter)
+            savedState = data.map { $0.map { $0 } } // Deep copy
             currentFileURL = url
             isModified = false
             shouldFocusFirstCell = true
@@ -141,12 +143,17 @@ class CSVViewModel: ObservableObject {
             }
 
             try content.write(to: url, atomically: true, encoding: .utf8)
+            savedState = data.map { $0.map { $0 } } // Deep copy
             isModified = false
             delimiter = saveDelimiter
         } catch {
             print("Error saving file: \(error)")
             showAlert(message: "Failed to save file: \(error.localizedDescription)")
         }
+    }
+
+    func updateModifiedState() {
+        isModified = (data != savedState)
     }
 
     private func showAlert(message: String) {
